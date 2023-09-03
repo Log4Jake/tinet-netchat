@@ -8,8 +8,8 @@ DESCRIPTION = "TINET Client"
 COMPRESSED = YES
 ARCHIVED = YES
 
-CFLAGS = -Wall -Wextra -Oz
-CXXFLAGS = -Wall -Wextra -Oz
+CFLAGS = -Wall -Wextra -Oz -ferror-limit=100
+CXXFLAGS = -Wall -Wextra -Oz -ferror-limit=100
 
 # ----------------------------
 

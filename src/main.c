@@ -29,7 +29,6 @@
 #include <tice.h>
 #include <debug.h>
 #include <stdbool.h>
-#include <tice.h>
 #include <ti/info.h>
 #include <stdint.h>
 
@@ -37,23 +36,21 @@
 
 #include "ui/shapes.h"
 
+#include "tinet.h"
+
 #define MAX_MESSAGES 15
 #define MAX_LINE_LENGTH (GFX_LCD_WIDTH - 40)
 
-const system_info_t *systemInfo;
+const system_info_t *calcSystemInfo;
 
 bool inside_RTC_chat = false;
 
-/* DEFINE USER */
-bool keyfile_available = false;
-char *username;
-char *authkey;
-uint8_t appvar;
-
 /* READ BUFFERS */
 size_t read_flen;
-uint8_t *ptr;
-char in_buffer[32768];
+char in_buffer;
+
+/* USER */
+char username;
 
 /* DEFINE FUNCTIONS */
 void GFXspritesInit();
@@ -62,9 +59,7 @@ void NoKeyFileGFX();
 void KeyFileAvailableGFX();
 void FreeMemory();
 void quitProgram();
-void login();
 void readSRL();
-void sendSerialInitData();
 void getCurrentTime();
 void printServerPing();
 void dashboardScreen();
@@ -81,20 +76,6 @@ void updateCaseBox(bool isUppercase);
 void ESP8266login();
 bool kb_Update();
 
-/* DEFINE CONNECTION VARS */
-bool USB_connected = false;
-bool prev_USB_connected = false;
-bool USB_connecting = false;
-bool bridge_connected = false;
-bool internet_connected = false;
-bool has_unread_data = false;
-srl_device_t srl;
-bool has_srl_device = false;
-uint8_t srl_buf[512];
-bool serial_init_data_sent = false;
-usb_error_t usb_error;
-const usb_standard_descriptors_t *usb_desc;
-bool is_esp8266 = false;
 
 uint8_t previous_kb_Data[8];
 uint8_t debounce_delay = 10;
@@ -275,25 +256,6 @@ void release_sprites()
     free(zipper_mouth_sprite);
 }
 
-/* CONNECTION FUNCTIONS */
-void SendSerial(const char *message)
-{
-    size_t totalBytesWritten = 0;
-    size_t messageLength = strlen(message);
-
-    while (totalBytesWritten < messageLength)
-    {
-        int bytesWritten = srl_Write(&srl, message + totalBytesWritten, messageLength - totalBytesWritten);
-
-        if (bytesWritten < 0)
-        {
-            printf("SRL W ERR");
-        }
-
-        totalBytesWritten += bytesWritten;
-    }
-}
-
 /* Updates kb_Data and keeps track of previous keypresses, returns true if changes were detected */
 bool kb_Update()
 {
@@ -326,26 +288,6 @@ typedef struct
     void (*action)();
 } Button;
 
-void accountInfoButtonPressed()
-{
-    msleep(200);
-    printf("in dev\n");
-    /*
-    char out_buff_msg[14] = "ACCOUNT_INFO";
-    SendSerial(out_buff_msg);
-    size_t bytes_read;
-
-    do {
-        bytes_read = srl_Read(&srl, in_buffer, sizeof in_buffer);
-        if (bytes_read > 0) {
-            break;
-        }
-    } while (1);
-
-    accountInfoScreen(in_buffer);
-    */
-}
-
 void BucketsButtonPressed()
 {
     printf("Buckets btn press\n");
@@ -353,24 +295,17 @@ void BucketsButtonPressed()
 }
 
 Button dashboardButtons[] = {
-    {50, 60, 120, 30, "Account Info", accountInfoButtonPressed},
-    {50, 100, 120, 30, "TINET Chat", TINETChatScreen},
-    {50, 140, 120, 30, "Buckets", BucketsButtonPressed}};
+    {50, 100, 120, 30, "TINET Chat", TINETChatScreen}
+};
 int numDashboardButtons = sizeof(dashboardButtons) / sizeof(dashboardButtons[0]);
 
 void loginButtonPressed()
 {
-    if (!USB_connected && !USB_connecting && bridge_connected)
+    enum TINETLoginStatus loggedIn = tinet_login();
+    if (loggedIn == TINET_LOGIN_SUCCESS)
     {
-        USB_connecting = true;
-        if (is_esp8266 == true)
-        {
-            login(); // on purpose, the ESP8266 login system is not done currently
-        }
-        else
-        {
-            login();
-        }
+        username = tinetGetUsername();
+        dashboardScreen();
     }
 }
 
@@ -430,71 +365,13 @@ typedef struct
 #define TITLE_X_POS 5
 #define TITLE_Y_POS 5
 
-usb_error_t handle_usb_event(usb_event_t event, void *event_data, usb_callback_data_t *callback_data)
-{
-    usb_error_t err;
-    if ((err = srl_UsbEventCallback(event, event_data, callback_data)) != USB_SUCCESS)
-        return err;
-    if (event == USB_DEVICE_CONNECTED_EVENT && !(usb_GetRole() & USB_ROLE_DEVICE))
-    {
-        usb_device_t device = event_data;
-        USB_connected = true;
-        usb_ResetDevice(device);
-    }
-
-    if (event == USB_HOST_CONFIGURE_EVENT || (event == USB_DEVICE_ENABLED_EVENT && !(usb_GetRole() & USB_ROLE_DEVICE)))
-    {
-
-        if (has_srl_device)
-            return USB_SUCCESS;
-
-        usb_device_t device;
-        if (event == USB_HOST_CONFIGURE_EVENT)
-        {
-            device = usb_FindDevice(NULL, NULL, USB_SKIP_HUBS);
-            if (device == NULL)
-                return USB_SUCCESS;
-        }
-        else
-        {
-            device = event_data;
-        }
-
-        srl_error_t error = srl_Open(&srl, device, srl_buf, sizeof srl_buf, SRL_INTERFACE_ANY, 9600);
-        if (error)
-        {
-            gfx_End();
-            os_ClrHome();
-            printf("Error %d initting serial\n", error);
-            while (os_GetCSC())
-                ;
-            return 0;
-            return USB_SUCCESS;
-        }
-        has_srl_device = true;
-    }
-
-    if (event == USB_DEVICE_DISCONNECTED_EVENT)
-    {
-        usb_device_t device = event_data;
-        if (device == srl.dev)
-        {
-            USB_connected = false;
-            srl_Close(&srl);
-            has_srl_device = false;
-        }
-    }
-
-    return USB_SUCCESS;
-}
-
 int main(void)
 {
-    const system_info_t *systemInfo = os_GetSystemInfo();
+    const system_info_t *calcSystemInfo = os_GetSystemInfo();
 
-    if (systemInfo->hardwareType2 != 9)
+    if (calcSystemInfo->hardwareType2 != 9)
     {
-        printf("%02X", systemInfo->hardwareType2);
+        printf("%02X", calcSystemInfo->hardwareType2);
         printf("\n");
         printf("not TI-84+CE");
         msleep(500);
@@ -504,6 +381,15 @@ int main(void)
     // Initialize graphics and settings
     gfx_Begin();
     GFXsettings();
+
+    // initialize TINET
+    enum TINETInitStatus tinet_initialized = tinet_init();
+    if (tinet_initialized == TINET_INIT_FAIL)
+    {
+        printf("TINET INIT\nFAIL\n");
+        msleep(1000);
+        return 0;
+    }
 
     // load sprites
     load_sprites();
@@ -519,50 +405,13 @@ int main(void)
     gfx_SetTextScale(1, 1);
 
     /* CALC ID DISPLAY BOTTOM RIGHT */
-    char calcidStr[sizeof(systemInfo->calcid) * 2 + 1];
-    for (unsigned int i = 0; i < sizeof(systemInfo->calcid); i++)
+    char calcidStr[sizeof(calcSystemInfo->calcid) * 2 + 1];
+    for (unsigned int i = 0; i < sizeof(calcSystemInfo->calcid); i++)
     {
-        sprintf(calcidStr + i * 2, "%02X", systemInfo->calcid[i]);
+        sprintf(calcidStr + i * 2, "%02X", calcSystemInfo->calcid[i]);
     }
 
     gfx_PrintStringXY(calcidStr, 320 - gfx_GetStringWidth(calcidStr), 232);
-
-    // Open and read appvar data
-    appvar = ti_Open("NETKEY", "r");
-    if (appvar == 0)
-    {
-        keyfile_available = false;
-        NoKeyFileGFX();
-    }
-    else
-    {
-        // Read and process appvar data
-        read_flen = ti_GetSize(appvar);
-        uint8_t *data_ptr = (uint8_t *)ti_GetDataPtr(appvar);
-        ti_Close(appvar);
-
-        char *read_username = (char *)data_ptr;
-        username = read_username;
-
-        size_t read_un_len = strlen(read_username) + 1;
-        data_ptr += (read_un_len + 1);
-        read_flen -= (read_un_len + 1);
-
-        char *read_key = (char *)data_ptr - 1;
-        authkey = read_key;
-
-        keyfile_available = true;
-        KeyFileAvailableGFX();
-    }
-
-    const usb_standard_descriptors_t *usb_desc = srl_GetCDCStandardDescriptors();
-    usb_error_t usb_error = usb_Init(handle_usb_event, NULL, usb_desc, USB_DEFAULT_INIT_FLAGS);
-    if (usb_error)
-    {
-        printf("usb init error\n%u\n", usb_error);
-        sleep(2);
-        return 1;
-    }
 
     int selectedButton = 0;
     drawButtons(mainMenuButtons, numMainMenuButtons, selectedButton);
@@ -571,16 +420,7 @@ int main(void)
     {
         kb_Update();
 
-        usb_HandleEvents();
-        if (has_srl_device)
-        {
-            readSRL();
-        }
-
-        if (has_srl_device && bridge_connected && !serial_init_data_sent)
-        {
-            sendSerialInitData();
-        }
+        tinet_handle_srl();
 
         if (kb_Data[7] == kb_Down && previous_kb_Data[7] != kb_Down)
         {
@@ -646,11 +486,8 @@ void accountInfoScreen(const char *accountInfo)
     {
         kb_Update();
 
-        usb_HandleEvents();
-        if (has_srl_device)
-        {
-            readSRL();
-        }
+        tinet_handle_srl();
+    
     } while (kb_Data[6] != kb_Clear);
 }
 
@@ -676,11 +513,8 @@ void dashboardScreen()
     do
     {
         kb_Update();
-        usb_HandleEvents();
-        if (has_srl_device)
-        {
-            readSRL();
-        }
+        
+        tinet_handle_srl();
 
         if (kb_Data[6] == kb_Clear)
         {
@@ -730,150 +564,33 @@ void NoKeyFileGFX()
     gfx_PrintStringXY("https://tinet.tkbstudios.com/login", ((GFX_LCD_WIDTH - gfx_GetStringWidth("https://tinet.tkbstudios.com/login")) / 2), 100);
 }
 
-void login()
-{
-    char calcidStr[sizeof(systemInfo->calcid) * 2 + 1];
-    for (unsigned int i = 0; i < sizeof(systemInfo->calcid); i++)
-    {
-        sprintf(calcidStr + i * 2, "%02X", systemInfo->calcid[i]);
-    }
-    char login_msg[93];
-    snprintf(login_msg, sizeof(login_msg), "LOGIN:%s:%s:%s", calcidStr, username, authkey);
-    SendSerial(login_msg);
-}
-
 void readSRL()
 {
-    size_t bytes_read = srl_Read(&srl, in_buffer, sizeof in_buffer);
+    in_buffer = tinet_handle_srl();
 
-    if (bytes_read < 0)
+    if (startsWith(in_buffer, "ACCOUNT_INFO:"))
     {
-        // has_srl_device = false;
-        printf("SRL 0B");
+        printf("got acc inf");
+        accountInfoScreen(in_buffer + strlen("ACCOUNT_INFO:"));
     }
-    else if (bytes_read > 0)
+
+
+    if (startsWith(in_buffer, "RTC_CHAT:"))
     {
-        in_buffer[bytes_read] = '\0';
-        has_unread_data = true;
-
-        /* BRIDGE CONNECTED GFX */
-        if (strcmp(in_buffer, "bridgeConnected") == 0)
+        char *messageContent = strstr(in_buffer, ":");
+        
+        if (messageContent)
         {
-            bridge_connected = true;
-            gfx_SetColor(0);
-            gfx_FillRectangle(((GFX_LCD_WIDTH - gfx_GetStringWidth("Bridge disconnected!")) / 2), 80, gfx_GetStringWidth("Bridge disconnected!"), 15);
-            gfx_SetColor(0);
-            gfx_PrintStringXY("Bridge connected!", ((GFX_LCD_WIDTH - gfx_GetStringWidth("Bridge connected!")) / 2), 80);
-        }
-        if (strcmp(in_buffer, "bridgeDisconnected") == 0)
-        {
-            bridge_connected = false;
-            gfx_SetColor(0);
-            gfx_FillRectangle(((GFX_LCD_WIDTH - gfx_GetStringWidth("Bridge disconnected!")) / 2), 80, gfx_GetStringWidth("Bridge disconnected!"), 15);
-            gfx_SetColor(0);
-            gfx_PrintStringXY("Bridge disconnected!", ((GFX_LCD_WIDTH - gfx_GetStringWidth("Bridge disconnected!")) / 2), 80);
-        }
-
-        /* Internet Connected GFX */
-        if (strcmp(in_buffer, "SERIAL_CONNECTED_CONFIRMED_BY_SERVER") == 0)
-        {
-            internet_connected = true;
-            gfx_SetColor(0);
-            gfx_FillRectangle(((GFX_LCD_WIDTH - gfx_GetStringWidth("Internet disconnected!")) / 2), 110, gfx_GetStringWidth("Internet disconnected!"), 15);
-            gfx_SetColor(0);
-            gfx_PrintStringXY("Internet connected!", ((GFX_LCD_WIDTH - gfx_GetStringWidth("Internet connected!")) / 2), 110);
-        }
-        if (strcmp(in_buffer, "internetDisconnected") == 0)
-        {
-            internet_connected = false;
-            gfx_SetColor(0);
-            gfx_FillRectangle(((GFX_LCD_WIDTH - gfx_GetStringWidth("Internet disconnected!")) / 2), 110, gfx_GetStringWidth("Internet disconnected!"), 15);
-            gfx_SetColor(0);
-            gfx_PrintStringXY("Internet disconnected!", ((GFX_LCD_WIDTH - gfx_GetStringWidth("Internet disconnected!")) / 2), 110);
-        }
-
-        if (strcmp(in_buffer, "LOGIN_SUCCESS") == 0)
-        {
-            dashboardScreen();
-        }
-
-        if (strcmp(in_buffer, "MAIL_NOT_VERIFIED") == 0)
-        {
-            printf("Mail not\nverified!");
-        }
-
-        if (strcmp(in_buffer, "ALREADY_CONNECTED") == 0)
-        {
-            alreadyConnectedScreen();
-        }
-
-        if (strcmp(in_buffer, "USER_NOT_FOUND") == 0)
-        {
-            userNotFoundScreen();
-        }
-
-        if (strcmp(in_buffer, "INVALID_CALC_KEY") == 0)
-        {
-            printf("Invalid\ncalc key");
-        }
-
-        if (strcmp(in_buffer, "DIFFERENT_CALC_ID") == 0)
-        {
-            printf("Different\ncalc ID");
-        }
-
-        if (strcmp(in_buffer, "CALC_BANNED") == 0)
-        {
-            printf("You're\nbanned.");
-        }
-
-        if (startsWith(in_buffer, "ACCOUNT_INFO:"))
-        {
-            printf("got acc inf");
-            accountInfoScreen(in_buffer + strlen("ACCOUNT_INFO:"));
-        }
-
-        if (startsWith(in_buffer, "YOUR_IP:"))
-        {
-            displayIP(in_buffer + strlen("YOUR_IP:"));
-        }
-        if (startsWith(in_buffer, "CALC_ID_UPDATE_NEEDED"))
-        {
-            calcIDneedsUpdateScreen();
-        }
-
-        if (startsWith(in_buffer, "RTC_CHAT:"))
-        {
-            char *messageContent = strstr(in_buffer, ":");
-            
+            messageContent = strstr(messageContent + 1, ":");
             if (messageContent)
             {
-                messageContent = strstr(messageContent + 1, ":");
-                if (messageContent)
-                {
-                    messageContent++;
-                    messageContent++;
-                    addMessage(messageContent, 200 + messageCount * 15);
-                    displayMessages();
-                }
+                messageContent++;
+                messageContent++;
+                addMessage(messageContent, 200 + messageCount * 15);
+                displayMessages();
             }
         }
-
-        if (strcmp(in_buffer, "ESP8266") == 0)
-        {
-            is_esp8266 = true;
-            gfx_PrintStringXY("ESP8266 connected", 5, 232);
-        }
-
-        has_unread_data = false;
     }
-}
-
-void sendSerialInitData()
-{
-    serial_init_data_sent = true;
-    char init_serial_connected_text_buffer[17] = "SERIAL_CONNECTED";
-    SendSerial(init_serial_connected_text_buffer);
 }
 
 void quitProgram()
@@ -914,11 +631,7 @@ void howToUseScreen()
     {
         kb_Update();
 
-        usb_HandleEvents();
-        if (has_srl_device)
-        {
-            readSRL();
-        }
+        tinet_handle_srl();
 
         if (kb_Data[6] == kb_Clear)
         {
@@ -961,11 +674,7 @@ void userNotFoundScreen()
     {
         kb_Update();
 
-        usb_HandleEvents();
-        if (has_srl_device)
-        {
-            readSRL();
-        }
+        tinet_handle_srl();
 
         if (kb_Data[6] == kb_Clear)
         {
@@ -984,14 +693,14 @@ void calcIDneedsUpdateScreen()
     gfx_SetTextScale(1, 1);
     gfx_PrintStringXY("update it on https://tinet.tkbstudios.com/dashboard", (GFX_LCD_WIDTH - gfx_GetStringWidth("update it on https://tinet.tkbstudios.com/dashboard")) / 2, 50);
 
-    if (systemInfo != NULL)
+    if (calcSystemInfo != NULL)
     {
         gfx_PrintStringXY("calcid: ", 10, 70);
 
-        char calcidStr[sizeof(systemInfo->calcid) * 2 + 1];
-        for (unsigned int i = 0; i < sizeof(systemInfo->calcid); i++)
+        char calcidStr[sizeof(calcSystemInfo->calcid) * 2 + 1];
+        for (unsigned int i = 0; i < sizeof(calcSystemInfo->calcid); i++)
         {
-            sprintf(calcidStr + i * 2, "%02X", systemInfo->calcid[i]);
+            sprintf(calcidStr + i * 2, "%02X", calcSystemInfo->calcid[i]);
         }
         gfx_PrintStringXY(calcidStr, 10 + gfx_GetStringWidth("calcid: "), 70);
     }
@@ -1004,11 +713,7 @@ void calcIDneedsUpdateScreen()
     {
         kb_Update();
 
-        usb_HandleEvents();
-        if (has_srl_device)
-        {
-            readSRL();
-        }
+        tinet_handle_srl();
 
         if (kb_Data[6] == kb_Clear)
         {
@@ -1052,12 +757,7 @@ void TINETChatScreen()
         char buffer[128] = {0};
         i = 0;
 
-        usb_HandleEvents();
-
-        if (has_srl_device)
-        {
-            readSRL();
-        }
+        tinet_handle_srl();
 
         gfx_SetColor(25);
         gfx_FillRectangle(0, 190, 320, 50);
@@ -1107,13 +807,8 @@ void TINETChatScreen()
                 gfx_PrintStringXY(buffer, 10, 220);
                 gfx_SetTextScale(1, 1);
             }
-
-            usb_HandleEvents();
-
-            if (has_srl_device)
-            {
-                readSRL();
-            }
+            
+            tinet_handle_srl();
 
             if (key == sk_Clear)
             {
@@ -1151,7 +846,7 @@ void TINETChatScreen()
         {
             strcat(output_buffer, buffer);
 
-            SendSerial(output_buffer);
+            tinet_write_serial(output_buffer);
             msleep(100);
             gfx_SetColor(25);
             gfx_FillRectangle(0, 210, 320, 30);
